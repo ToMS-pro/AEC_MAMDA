@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Allocation Excel Converter</title>
+<style>
+:root{font-family:Arial,Helvetica,sans-serif;color:#172033;background:#f3f6fb}
+*{box-sizing:border-box}body{margin:0;padding:28px 16px}
+.wrap{max-width:980px;margin:auto}.head{margin-bottom:22px}
+h1{font-size:27px;margin:0 0 8px}.sub{color:#64748b;line-height:1.5}
+.panel{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:22px;margin:16px 0;box-shadow:0 5px 18px #0f172a08}
+.upload{border:2px dashed #94a3b8;border-radius:12px;padding:28px;text-align:center;background:#f8fafc}
+.upload strong{display:block;margin-bottom:8px}.upload input{max-width:100%;margin-top:14px}
+button{border:0;border-radius:10px;padding:12px 18px;font-weight:700;cursor:pointer;background:#2563eb;color:#fff}
+button:disabled{opacity:.45;cursor:not-allowed}.secondary{background:#e2e8f0;color:#1e293b}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px}
+.stat{background:#f8fafc;border:1px solid #e2e8f0;padding:14px;border-radius:12px}
+.stat b{font-size:23px;display:block;margin-bottom:4px}.stat span{font-size:12px;color:#64748b}
+.status{padding:12px;border-radius:10px;margin-top:14px;line-height:1.5;display:none}
+.ok{display:block;background:#ecfdf5;color:#065f46}.warn{display:block;background:#fff7ed;color:#9a3412}
+.err{display:block;background:#fef2f2;color:#991b1b}
+.tablebox{overflow:auto;max-height:360px;border:1px solid #e2e8f0;border-radius:10px}
+table{border-collapse:collapse;width:100%;font-size:12px;white-space:nowrap}
+th,td{padding:9px 11px;border-bottom:1px solid #e2e8f0;text-align:left}
+th{position:sticky;top:0;background:#f1f5f9;z-index:1}
+.note{font-size:13px;color:#64748b;line-height:1.6}
+@media(max-width:600px){body{padding:18px 10px}h1{font-size:22px}.panel{padding:16px}.stats{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <h1>Allocation Excel Converter</h1>
+    <div class="sub">Memecah kolom SP/PV List menjadi satu nomor per baris dan menghasilkan file Excel baru dengan 13 kolom.</div>
+  </div>
+
+  <section class="panel">
+    <h3>1. Pilih file Excel asli</h3>
+    <div class="upload">
+      <strong>Upload file Allocation (.xlsx)</strong>
+      <div class="note">File diproses di browser komputer ini. Data tidak dikirim ke server.</div>
+      <input id="fileInput" type="file" accept=".xlsx,.xls">
+    </div>
+    <div id="fileName" class="note" style="margin-top:10px">Belum ada file dipilih.</div>
+    <div class="actions">
+      <button id="processBtn" disabled>Proses & Preview</button>
+      <button id="resetBtn" class="secondary">Reset</button>
+    </div>
+    <div id="status" class="status"></div>
+  </section>
+
+  <section class="panel" id="resultPanel" style="display:none">
+    <h3>2. Ringkasan hasil</h3>
+    <div class="stats">
+      <div class="stat"><b id="sourceCount">0</b><span>Baris transaksi sumber</span></div>
+      <div class="stat"><b id="outputCount">0</b><span>Baris hasil / nomor SP-PV</span></div>
+      <div class="stat"><b id="allocationCount">0</b><span>Allocation ID unik</span></div>
+    </div>
+    <div id="warningList" class="status"></div>
+    <h3 style="margin-top:24px">3. Preview hasil (maksimal 20 baris)</h3>
+    <div class="tablebox"><table id="previewTable"></table></div>
+    <h3 style="margin-top:24px">4. Pilih format download</h3>
+    <div class="actions">
+      <button id="downloadXlsxBtn">Download Excel (.xlsx)</button>
+      <button id="downloadCsvBtn" class="secondary">Download CSV (.csv)</button>
+    </div>
+    <div id="exportLog" class="status" style="display:none;white-space:pre-line"></div>
+  </section>
+  <section class="panel note">
+    <b>Catatan:</b><br>
+    • Nomor SP/PV disimpan sebagai teks agar angka panjang tidak berubah menjadi notasi ilmiah.<br>
+    • No Item dihitung ulang dari 1 untuk setiap Allocation ID.<br>
+    • Kolom Total tetap mengikuti nilai dari file asli.<br>
+    • Jika jumlah item SP/PV berbeda dengan Total, generator memberi peringatan dan tetap memasukkan semua item yang terbaca.<br>
+    • Jika satu nomor tidak memiliki tanda titik dua (:), item tersebut tidak dibuang; kodenya dikosongkan dan ditandai pada peringatan.
+  </section>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script>
+const OUTPUT_HEADERS = [
+  "Allocation ID","Allocation Time","Sales Cluster","Canvasser ID","RO ID",
+  "Order ID","Total","Product ID","Product Name","No Item",
+  "SP/PV Number","SP/PV Code","Allocated By"
+];
+const fileInput = document.getElementById("fileInput");
+const processBtn = document.getElementById("processBtn");
+const resetBtn = document.getElementById("resetBtn");
+const downloadXlsxBtn = document.getElementById("downloadXlsxBtn");
+const downloadCsvBtn = document.getElementById("downloadCsvBtn");
+const exportLog = document.getElementById("exportLog");
+const statusBox = document.getElementById("status");
+const resultPanel = document.getElementById("resultPanel");
+let sourceRows = [];
+let outputRows = [];
+let outputWorkbook = null;
+
+function normalizeHeader(value){
+  return String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]/g,"");
+}
+function cleanCell(value){
+  if(value === null || value === undefined) return "";
+  return String(value).replace(/\r?\n/g," ").replace(/\s+/g," ").trim();
+}
+function showStatus(message,type="ok"){
+  statusBox.className = "status " + type;
+  statusBox.textContent = message;
+}
+function findColumn(headers, candidates){
+  const normalized = headers.map(normalizeHeader);
+  for(const candidate of candidates){
+    const index = normalized.indexOf(normalizeHeader(candidate));
+    if(index !== -1) return index;
+  }
+  return -1;
+}
+function renderPreview(rows){
+  const table = document.getElementById("previewTable");
+  const preview = rows.slice(0,20);
+  let html = "<thead><tr>" + OUTPUT_HEADERS.map(h=>`<th>${escapeHtml(h)}</th>`).join("") + "</tr></thead><tbody>";
+  for(const row of preview){
+    html += "<tr>" + row.map(v=>`<td>${escapeHtml(v)}</td>`).join("") + "</tr>";
+  }
+  html += "</tbody>";
+  table.innerHTML = html;
+}
+function escapeHtml(value){
+  return String(value ?? "").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+fileInput.addEventListener("change",()=>{
+  const file = fileInput.files[0];
+  processBtn.disabled = !file;
+  resultPanel.style.display = "none";
+  outputRows = [];
+  outputWorkbook = null;
+  exportLog.style.display = "none";
+  document.getElementById("fileName").textContent = file ? `File dipilih: ${file.name} (${(file.size/1024).toFixed(1)} KB)` : "Belum ada file dipilih.";
+  statusBox.className = "status";
+});
+resetBtn.addEventListener("click",()=>{
+  fileInput.value = "";
+  processBtn.disabled = true;
+  sourceRows = [];
+  outputRows = [];
+  outputWorkbook = null;
+  resultPanel.style.display = "none";
+  exportLog.style.display = "none";
+  statusBox.className = "status";
+  document.getElementById("fileName").textContent = "Belum ada file dipilih.";
+});
+processBtn.addEventListener("click", async()=>{
+  const file = fileInput.files[0];
+  if(!file) return;
+  if(typeof XLSX === "undefined"){
+    showStatus("Library pembaca Excel belum termuat. Pastikan komputer terhubung ke internet saat membuka generator.", "err");
+    return;
+  }
+  processBtn.disabled = true;
+  showStatus("Sedang membaca dan memproses Excel...");
+  try{
+    const buffer = await file.arrayBuffer();
+    const workbook = XLSX.read(buffer,{type:"array",cellDates:false});
+    const sheetName = workbook.SheetNames[0];
+    if(!sheetName) throw new Error("Sheet Excel tidak ditemukan.");
+    const sheet = workbook.Sheets[sheetName];
+    const matrix = XLSX.utils.sheet_to_json(sheet,{header:1,defval:"",raw:false});
+    if(matrix.length < 2) throw new Error("Tidak ada baris data setelah header.");
+    const headers = matrix[0].map(cleanCell);
+    const col = {
+      allocation:findColumn(headers,["Allocation ID","Allocation   ID"]),
+      time:findColumn(headers,["Allocation Time"]),
+      cluster:findColumn(headers,["Sales Cluster"]),
+      canvasser:findColumn(headers,["Canvasser ID"]),
+      ro:findColumn(headers,["RO ID"]),
+      order:findColumn(headers,["Order ID"]),
+      total:findColumn(headers,["Total"]),
+      productId:findColumn(headers,["Product ID"]),
+      productName:findColumn(headers,["Product Name"]),
+      list:findColumn(headers,["SP/PV List"]),
+      allocatedBy:findColumn(headers,["Allocated By"])
+    };
+    const required = Object.entries(col).filter(([k,v])=>v===-1).map(([k])=>k);
+    if(required.length) throw new Error("Kolom wajib tidak ditemukan: " + required.join(", ") + ". Periksa nama header pada Excel.");
+    sourceRows = matrix.slice(1).filter(r=>r.some(v=>String(v??"").trim()!==""));
+    const counters = new Map();
+    const warnings = [];
+    outputRows = [];
+    let malformed = 0;
+    for(let r=0;r<sourceRows.length;r++){
+      const src = sourceRows[r];
+      const get = key => cleanCell(src[col[key]]);
+      const allocationId = get("allocation");
+      const rawList = get("list");
+      if(!rawList){
+        warnings.push(`Baris Excel ${r+2}: SP/PV List kosong (Allocation ID ${allocationId || "tidak diketahui"}).`);
+        continue;
+      }
+      const items = rawList.split("|").map(x=>x.trim()).filter(Boolean);
+      for(const item of items){
+        const splitAt = item.indexOf(":");
+        let number = "", code = "";
+        if(splitAt < 0){
+          number = item.trim();
+          malformed++;
+        }else{
+          number = item.slice(0,splitAt).trim();
+          code = item.slice(splitAt+1).trim();
+        }
+        const nextNo = (counters.get(allocationId)||0)+1;
+        counters.set(allocationId,nextNo);
+        outputRows.push([
+          allocationId,get("time"),get("cluster"),get("canvasser"),get("ro"),
+          get("order"),get("total"),get("productId"),get("productName"),
+          String(nextNo),String(number),String(code),get("allocatedBy")
+        ]);
+      }
+      const totalText = get("total");
+      const expected = Number(totalText.replace(/,/g,""));
+      if(totalText!=="" && Number.isFinite(expected) && expected !== items.length){
+        warnings.push(`Allocation ${allocationId}: Total ${totalText}, tetapi item SP/PV terbaca ${items.length}.`);
+      }
+    }
+    if(outputRows.length===0) throw new Error("Tidak ada item SP/PV yang berhasil dibaca.");
+    const outputSheet = XLSX.utils.aoa_to_sheet([OUTPUT_HEADERS,...outputRows]);
+    // Force identifier columns to text in the generated workbook.
+    for(let row=1;row<=outputRows.length;row++){
+      for(const colIndex of [0,3,4,5,7,10,11,12]){
+        const address = XLSX.utils.encode_cell({r:row,c:colIndex});
+        if(outputSheet[address]){
+          outputSheet[address].t = "s";
+          outputSheet[address].v = String(outputSheet[address].v ?? "");
+        }
+      }
+    }
+    outputSheet["!cols"] = OUTPUT_HEADERS.map((h,i)=>({wch:Math.max(h.length+2, i===10?20:i===11?18:14)}));
+    outputWorkbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(outputWorkbook,outputSheet,"Allocation Detail");
+    exportLog.style.display = "none";
+    document.getElementById("sourceCount").textContent = sourceRows.length.toLocaleString("id-ID");
+    document.getElementById("outputCount").textContent = outputRows.length.toLocaleString("id-ID");
+    document.getElementById("allocationCount").textContent = counters.size.toLocaleString("id-ID");
+    renderPreview(outputRows);
+    const warningList = document.getElementById("warningList");
+    const hasTotalMismatch = warnings.some(w=>w.includes("Total ") && w.includes("item SP/PV terbaca"));
+    if(warnings.length || malformed){
+      warningList.className = "status warn";
+      warningList.innerHTML = `<b>Perlu diperiksa (${warnings.length + (malformed?1:0)} temuan)</b><br>`+
+        warnings.slice(0,30).map(escapeHtml).join("<br>")+
+        (warnings.length>30?`<br>...dan ${warnings.length-30} temuan lainnya.`:"")+
+        (malformed?`<br>${malformed} item tidak memiliki tanda ':'; nomor tetap dimasukkan, kode dikosongkan.`:"");
+    }else{
+      warningList.className = "status ok";
+      warningList.textContent = `Semua baris berhasil diproses. Jumlah item cocok dengan kolom Total (${outputRows.length.toLocaleString("id-ID")}).`;
+    }
+    resultPanel.style.display = "block";
+    showStatus("Selesai! Periksa preview dan peringatan sebelum mengunduh.", "ok");
+  }catch(error){
+    showStatus(error.message || "Terjadi kesalahan saat memproses file.", "err");
+  }finally{
+    processBtn.disabled = false;
+  }
+});
+function getExportStamp(){
+  const now = new Date();
+  const date = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,"0")}${String(now.getDate()).padStart(2,"0")}`;
+  const time = `${String(now.getHours()).padStart(2,"0")}${String(now.getMinutes()).padStart(2,"0")}`;
+  return {date,time};
+}
+function showExportLog(fileName, formatLabel){
+  const sourceCount = sourceRows.length;
+  const resultCount = outputRows.length;
+  const allocations = new Set(outputRows.map(row=>row[0])).size;
+  const totals = new Map();
+  const sourceTotals = new Map();
+  for(const row of outputRows){
+    totals.set(row[0],(totals.get(row[0])||0)+1);
+  }
+  // Total validation is calculated per source row; each source row's Total is compared
+  // with the number of parsed SP/PV items from that row during conversion.
+  const sourceTotalSum = sourceRows.reduce((sum,row)=>{
+    const idx = row.__totalIndex;
+    return sum + (idx === undefined ? 0 : (Number(String(row[idx]??"").replace(/,/g,""))||0));
+  },0);
+  const totalText = document.getElementById("warningList").textContent;
+  const hasMismatch = /Total .* tetapi item SP\/PV terbaca/.test(totalText);
+  const matchLine = hasMismatch
+    ? "⚠ Perlu pemeriksaan: ada Allocation ID dengan jumlah item berbeda dari kolom Total."
+    : `✓ Cocok dengan jumlah kolom Total (${resultCount.toLocaleString("id-ID")})`;
+  exportLog.className = "status " + (hasMismatch ? "warn" : "ok");
+  exportLog.textContent =
+    `✓ ${fileInput.files[0]?.name || "File Excel"}: ${sourceCount.toLocaleString("id-ID")} baris → ${resultCount.toLocaleString("id-ID")} baris\n\n`+
+    `Total: ${sourceCount.toLocaleString("id-ID")} baris asal → ${resultCount.toLocaleString("id-ID")} baris hasil\n`+
+    `${matchLine}\n\n`+
+    `Format: ${formatLabel}\n`+
+    `File terunduh: ${fileName}\n`+
+    `Allocation ID unik: ${allocations.toLocaleString("id-ID")}`;
+  exportLog.style.display = "block";
+}
+downloadXlsxBtn.addEventListener("click",()=>{
+  if(!outputWorkbook) return;
+  const {date,time} = getExportStamp();
+  const fileName = `SPPV_detail_${date}_${time}.xlsx`;
+  XLSX.writeFile(outputWorkbook,fileName);
+  showExportLog(fileName,"Excel (.xlsx)");
+});
+function csvEscape(value){
+  const text = String(value ?? "");
+  return '"' + text.replace(/"/g,'""') + '"';
+}
+downloadCsvBtn.addEventListener("click",()=>{
+  if(!outputRows.length) return;
+  const {date,time} = getExportStamp();
+  const fileName = `SPPV_detail_${date}_${time}.csv`;
+  const csv = [OUTPUT_HEADERS,...outputRows]
+    .map(row=>row.map(csvEscape).join(","))
+    .join("\r\n");
+  // UTF-8 BOM helps Excel recognize Indonesian/Unicode text in CSV.
+  const blob = new Blob(["\uFEFF",csv],{type:"text/csv;charset=utf-8;"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  showExportLog(fileName,"CSV (.csv)");
+});
+</script>
+</body>
+</html>
